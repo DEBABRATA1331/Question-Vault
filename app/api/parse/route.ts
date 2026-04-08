@@ -18,6 +18,8 @@ export interface ParsedQuestion {
   status: "Pending" | "Review" | "Complete";
   editorVideoLink: string;
   remarks: string;
+  superpower?: string;
+  subCompetency?: string;
   /** Permanent Google Sheet row number assigned when first written to the sheet */
   rowId?: number;
 }
@@ -93,6 +95,8 @@ function parseDocument(text: string, sourceUrl: string): ParsedQuestion[] {
   let currentDifficulty = "";
   let currentTime = "";
   let currentClip = "";
+  let currentSuperpower = "";
+  let currentSubCompetency = "";
   let captureMode: "question" | "options" | "answer" | "none" = "none";
 
   const flush = () => {
@@ -116,6 +120,8 @@ function parseDocument(text: string, sourceUrl: string): ParsedQuestion[] {
       status: "Pending",
       editorVideoLink: "",
       remarks: "",
+      superpower: currentSuperpower,
+      subCompetency: currentSubCompetency,
     });
     inQuestion = false;
     currentQNumLocal = "";
@@ -126,6 +132,8 @@ function parseDocument(text: string, sourceUrl: string): ParsedQuestion[] {
     currentDifficulty = "";
     currentTime = "";
     currentClip = "";
+    currentSuperpower = "";
+    currentSubCompetency = "";
     captureMode = "none";
   };
 
@@ -188,6 +196,18 @@ function parseDocument(text: string, sourceUrl: string): ParsedQuestion[] {
     // Clip reference
     if (/^\*?\s*Clip\s*Ref(erence)?\s*:/i.test(line)) {
       currentClip = line.replace(/^\*?\s*Clip\s*Ref(erence)?\s*:/i, "").trim();
+      continue;
+    }
+
+    // Superpower
+    if (/^\*?\s*Superpower\s*:/i.test(line)) {
+      currentSuperpower = line.replace(/^\*?\s*Superpower\s*:/i, "").trim();
+      continue;
+    }
+
+    // Sub-Competency
+    if (/^\*?\s*Sub-?Competency\s*:/i.test(line) || /^\*?\s*Sub\s*Competency\s*:/i.test(line)) {
+      currentSubCompetency = line.replace(/^\*?\s*Sub-?Competency\s*:/i, "").trim();
       continue;
     }
 

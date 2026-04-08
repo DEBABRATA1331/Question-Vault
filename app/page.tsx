@@ -46,16 +46,27 @@ const TYPE_COLORS: Record<string, string> = {
   "MCQ": "mcq", "True/False": "tf", "Multi-Correct": "multi", "MSQ": "multi", "Logical MCQ": "logical"
 };
 
+const SUPERPOWERS: Record<string, string[]> = {
+  "Smart Logic": ["Pattern Recognition", "Logical Deduction", "Reasoning Speed"],
+  "Master Builder": ["Mechanical Reasoning", "Systems Thinking", "Structural Planning"],
+  "Super Vision": ["Spatial Rotation", "Visual Mapping", "Object Relationship"],
+  "Idea Magic": ["Creative Divergence", "Innovation Thinking", "Solution Flexibility"],
+  "Rocket Speed": ["Reaction Time", "Processing Speed", "Rapid Decision"],
+  "Target Focus": ["Attention Span", "Distraction Resistance", "Persistence Focus"],
+};
+
 const FIELD_TO_COL: Record<string, number> = {
-  status: 15,
-  editorVideoLink: 16,
-  remarks: 17,
-  seriesTitle: 5,
-  videoTitle: 6,
-  sourceVideoLink: 7,
-  question: 8,
-  answer: 10,
+  status: 17,
+  editorVideoLink: 18,
+  remarks: 19,
+  seriesTitle: 7,
+  videoTitle: 8,
+  sourceVideoLink: 9,
+  question: 10,
+  answer: 12,
   questionType: 4,
+  superpower: 5,
+  subCompetency: 6,
 };
 
 function typeBadge(t: string) {
@@ -178,6 +189,23 @@ function EditModal({
           </div>
         </div>
 
+        <div className="modal-row" style={{ marginBottom: 12 }}>
+          <div className="modal-field">
+            <label>Superpower</label>
+            <select value={r.superpower || ""} onChange={(e) => setR({ ...r, superpower: e.target.value, subCompetency: "" })}>
+              <option value="">— Select —</option>
+              {Object.keys(SUPERPOWERS).map((sp) => <option key={sp}>{sp}</option>)}
+            </select>
+          </div>
+          <div className="modal-field">
+            <label>Sub-Competency</label>
+            <select value={r.subCompetency || ""} onChange={(e) => setR({ ...r, subCompetency: e.target.value })} disabled={!r.superpower}>
+              <option value="">— Select —</option>
+              {(SUPERPOWERS[r.superpower || ""] || []).map((sc) => <option key={sc}>{sc}</option>)}
+            </select>
+          </div>
+        </div>
+
         <div className="modal-field" style={{ marginBottom: 12 }}>
           <label>Series / Topic Title</label>
           <input value={r.seriesTitle} onChange={(e) => setR({ ...r, seriesTitle: e.target.value })} />
@@ -233,6 +261,7 @@ const SHEET_NAME = "Questions";
 
 const HEADERS = [
   "Date", "Q# Global", "Q# Local", "Question Type",
+  "Superpower", "Sub-Competency",
   "Series / Topic", "Video Title", "Source Video Link",
   "Question", "Options", "Answer", "Difficulty", "Time (sec)",
   "Clip Reference", "Source Doc", "Status", "Editor Video Link", "Remarks"
@@ -241,10 +270,11 @@ const HEADERS = [
 // Column index map (1-based) — must match HEADERS order exactly
 const COL = {
   date: 1, qNumGlobal: 2, qNumLocal: 3, questionType: 4,
-  seriesTitle: 5, videoTitle: 6, sourceVideoLink: 7,
-  question: 8, options: 9, answer: 10, difficulty: 11,
-  timeSec: 12, clipRef: 13, sourceDoc: 14,
-  status: 15, editorVideoLink: 16, remarks: 17
+  superpower: 5, subCompetency: 6,
+  seriesTitle: 7, videoTitle: 8, sourceVideoLink: 9,
+  question: 10, options: 11, answer: 12, difficulty: 13,
+  timeSec: 14, clipRef: 15, sourceDoc: 16,
+  status: 17, editorVideoLink: 18, remarks: 19
 };
 
 function getOrCreateSheet() {
@@ -336,6 +366,8 @@ function buildRow(q) {
     q.qNumGlobal,
     q.qNumLocal,
     q.questionType,
+    q.superpower || "",
+    q.subCompetency || "",
     q.seriesTitle,
     q.videoTitle,
     q.sourceVideoLink,
@@ -591,13 +623,26 @@ export default function Home() {
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || "Sync failed");
-      addToast("success", `🔄 Full re-sync: ${data.written} rows updated in Google Sheet`);
+
+      // If the server returned updatedQuestions (with new rowIds assigned),
+      // merge them back so live-updates work going forward
+      if (data.updatedQuestions?.length) {
+        setRows(data.updatedQuestions);
+        saveRows(data.updatedQuestions);
+      }
+
+      const newly = data.newlyAssigned ?? 0;
+      addToast(
+        "success",
+        `🔄 Re-sync done: ${data.written} rows synced${newly > 0 ? ` (${newly} new rowIds assigned)` : ""}`
+      );
     } catch (err: unknown) {
       addToast("error", err instanceof Error ? err.message : "Sync error");
     } finally {
       setSyncing(false);
     }
   };
+
 
   /* ── Status inline change (live) ── */
   const handleStatusChange = async (origIdx: number, status: Status) => {
@@ -638,7 +683,7 @@ export default function Home() {
 
     // Live update all changed fields
     if (updated.rowId && scriptUrl) {
-      const fields: (keyof ParsedQuestion)[] = ["status","editorVideoLink","remarks","seriesTitle","videoTitle","sourceVideoLink","question","answer","questionType"];
+      const fields: (keyof ParsedQuestion)[] = ["status","editorVideoLink","remarks","seriesTitle","videoTitle","sourceVideoLink","question","answer","questionType","superpower","subCompetency"];
       for (const field of fields) {
         if (!original || original[field] !== updated[field]) {
           if (FIELD_TO_COL[field]) {
@@ -703,9 +748,9 @@ export default function Home() {
   };
 
   const handleExportCSV = () => {
-    const headers = ["Date","Q# Global","Q# Local","Type","Series","Video Title","Source Link","Question","Answer","Difficulty","Time","Status","Editor Link","Remarks"];
+    const headers = ["Date","Q# Global","Q# Local","Type","Superpower","Sub-Competency","Series","Video Title","Source Link","Question","Answer","Difficulty","Time","Status","Editor Link","Remarks"];
     const csvRows = [headers, ...rows.map((r) => [
-      r.date, r.qNumGlobal, r.qNumLocal, r.questionType, r.seriesTitle,
+      r.date, r.qNumGlobal, r.qNumLocal, r.questionType, r.superpower || "", r.subCompetency || "", r.seriesTitle,
       r.videoTitle, r.sourceVideoLink, `"${r.question.replace(/"/g,'""')}"`,
       r.answer, r.difficulty, r.timeSec, r.status, r.editorVideoLink, r.remarks
     ])];
@@ -931,6 +976,7 @@ export default function Home() {
                     <th>Q# Global</th>
                     <th>Q# Local</th>
                     <th>Type</th>
+                    <th>Superpower</th>
                     <th>Series / Topic</th>
                     <th>Video Title</th>
                     <th>Source Link</th>
@@ -954,6 +1000,10 @@ export default function Home() {
                         <td className="td-qnum">G{q.qNumGlobal}</td>
                         <td className="td-qnum">{q.qNumLocal}</td>
                         <td>{typeBadge(q.questionType)}</td>
+                        <td className="td-superpower">
+                          <div style={{ fontSize: 13, fontWeight: 500, color: "var(--accent-cyan)", whiteSpace: "nowrap" }}>{q.superpower || "—"}</div>
+                          <div style={{ fontSize: 11, color: "var(--text-secondary)", whiteSpace: "nowrap" }}>{q.subCompetency || ""}</div>
+                        </td>
                         <td className="td-topic">{q.seriesTitle || "—"}</td>
                         <td style={{ fontSize: 12, color: "var(--text-secondary)", maxWidth: 160 }}>
                           {q.videoTitle || "—"}
