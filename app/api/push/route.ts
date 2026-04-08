@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ParsedQuestion } from "../parse/route";
 
+// Full upsert sync — finds each row by its rowId and overwrites it
+// Used as a safety-net "re-sync all" — never appends duplicates
 export async function POST(req: NextRequest) {
   let body: { questions: ParsedQuestion[]; scriptUrl: string };
   try {
@@ -17,14 +19,14 @@ export async function POST(req: NextRequest) {
   }
 
   if (!body.questions || body.questions.length === 0) {
-    return NextResponse.json({ error: "No questions to push" }, { status: 400 });
+    return NextResponse.json({ error: "No questions to sync" }, { status: 400 });
   }
 
   try {
     const resp = await fetch(body.scriptUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ questions: body.questions }),
+      body: JSON.stringify({ action: "full_sync", questions: body.questions }),
     });
 
     if (!resp.ok) {
@@ -35,7 +37,7 @@ export async function POST(req: NextRequest) {
     const result = await resp.json().catch(() => ({ success: true }));
     return NextResponse.json({ success: true, written: body.questions.length, result });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : "Failed to push to Apps Script";
+    const msg = err instanceof Error ? err.message : "Failed to sync to Apps Script";
     return NextResponse.json({ error: msg }, { status: 500 });
   }
 }

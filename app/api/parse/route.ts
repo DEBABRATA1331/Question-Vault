@@ -18,6 +18,8 @@ export interface ParsedQuestion {
   status: "Pending" | "Review" | "Complete";
   editorVideoLink: string;
   remarks: string;
+  /** Permanent Google Sheet row number assigned when first written to the sheet */
+  rowId?: number;
 }
 
 function extractDocId(url: string): string | null {

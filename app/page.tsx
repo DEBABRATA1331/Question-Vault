@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useRouter } from "next/navigation";
 import type { ParsedQuestion } from "./api/parse/route";
 
 /* ── helpers ─────────────────────────────────────────── */
@@ -27,11 +28,34 @@ function addHistory(url: string) {
 }
 
 type Status = "Pending" | "Review" | "Complete";
-type Toast = { id: number; type: "success" | "error" | "info"; msg: string };
+type Toast = { id: number; type: "success" | "error" | "info" | "sync"; msg: string };
+
+// Undo stack item
+type UndoEntry = {
+  type: "status" | "edit" | "import";
+  rowGlobal: number;
+  field?: string;
+  oldValue: unknown;
+  newValue: unknown;
+  // For import undo — the batch date to remove
+  batchDate?: string;
+};
 
 const STATUS_OPTIONS: Status[] = ["Pending", "Review", "Complete"];
 const TYPE_COLORS: Record<string, string> = {
   "MCQ": "mcq", "True/False": "tf", "Multi-Correct": "multi", "MSQ": "multi", "Logical MCQ": "logical"
+};
+
+const FIELD_TO_COL: Record<string, number> = {
+  status: 15,
+  editorVideoLink: 16,
+  remarks: 17,
+  seriesTitle: 5,
+  videoTitle: 6,
+  sourceVideoLink: 7,
+  question: 8,
+  answer: 10,
+  questionType: 4,
 };
 
 function typeBadge(t: string) {
@@ -49,6 +73,9 @@ function statusBadge(s: Status) {
     </span>
   );
 }
+
+// Suppress unused warning for statusBadge
+void statusBadge;
 
 function difficultyBar(d: string) {
   if (!d) return null;
@@ -91,7 +118,7 @@ function SettingsModal({
             placeholder="https://script.google.com/macros/s/YOUR_ID/exec"
           />
           <p style={{ marginTop: 8, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
-            Paste the URL of your deployed Apps Script Web App. See the <strong style={{ color: "var(--accent-violet-light)" }}>Apps Script Setup Guide</strong> below to get this URL.
+            Paste the URL of your deployed Apps Script Web App. See the <strong style={{ color: "var(--accent-violet-light)" }}>Apps Script Setup Guide</strong> below.
           </p>
         </div>
 
@@ -103,7 +130,7 @@ function SettingsModal({
             <ol style={{ paddingLeft: 16 }}>
               <li>Open <a href="https://sheets.google.com" target="_blank" style={{ color: "var(--accent-cyan)" }}>Google Sheets</a> → create a new sheet</li>
               <li>Go to <strong>Extensions → Apps Script</strong></li>
-              <li>Delete existing code and paste the <strong>Apps Script code</strong> (provided below)</li>
+              <li>Delete existing code and paste the <strong>Apps Script code</strong> (click "📄 Apps Script" button in header)</li>
               <li>Click <strong>Deploy → New Deployment</strong></li>
               <li>Type: <strong>Web App</strong>, Access: <strong>Anyone</strong></li>
               <li>Click <strong>Deploy</strong> → copy the Web App URL</li>
@@ -198,9 +225,9 @@ function EditModal({
   );
 }
 
-/* ── APPS SCRIPT CODE MODAL ──────────────────────────── */
-const APPS_SCRIPT_CODE = `// QuestionVault — Google Apps Script
-// Paste this in your sheet's Apps Script editor and deploy as a Web App
+/* ── APPS SCRIPT CODE (UPDATED) ──────────────────────── */
+const APPS_SCRIPT_CODE = `// QuestionVault v2 — Google Apps Script
+// Paste this in your sheet's Apps Script editor and deploy as a Web App (Anyone)
 
 const SHEET_NAME = "Questions";
 
@@ -211,64 +238,126 @@ const HEADERS = [
   "Clip Reference", "Source Doc", "Status", "Editor Video Link", "Remarks"
 ];
 
+// Column index map (1-based) — must match HEADERS order exactly
+const COL = {
+  date: 1, qNumGlobal: 2, qNumLocal: 3, questionType: 4,
+  seriesTitle: 5, videoTitle: 6, sourceVideoLink: 7,
+  question: 8, options: 9, answer: 10, difficulty: 11,
+  timeSec: 12, clipRef: 13, sourceDoc: 14,
+  status: 15, editorVideoLink: 16, remarks: 17
+};
+
+function getOrCreateSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_NAME);
+    sheet.appendRow(HEADERS);
+    formatHeaders(sheet);
+  }
+  return sheet;
+}
+
 function doPost(e) {
   const lock = LockService.getScriptLock();
-  lock.waitLock(10000);
+  lock.waitLock(15000);
   try {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    let sheet = ss.getSheetByName(SHEET_NAME);
-    if (!sheet) {
-      sheet = ss.insertSheet(SHEET_NAME);
-      sheet.appendRow(HEADERS);
-      formatHeaders(sheet);
-    }
     const data = JSON.parse(e.postData.contents);
-    const questions = data.questions || [];
-    
-    // Determine global offset from existing rows
-    const lastRow = sheet.getLastRow();
-    let globalOffset = lastRow <= 1 ? 0 : lastRow - 1;
+    const action = data.action || "init";
 
-    questions.forEach((q, idx) => {
-      const row = [
-        q.date,
-        globalOffset + idx + 1,
-        q.qNumLocal,
-        q.questionType,
-        q.seriesTitle,
-        q.videoTitle,
-        q.sourceVideoLink,
-        q.question,
-        (q.options || []).join(" | "),
-        q.answer,
-        q.difficulty,
-        q.timeSec,
-        q.clipRef,
-        q.sourceDoc,
-        q.status || "Pending",
-        q.editorVideoLink || "",
-        q.remarks || ""
-      ];
-      const r = sheet.appendRow(row);
-      colorRowByStatus(sheet, sheet.getLastRow(), q.status || "Pending");
-    });
+    if (action === "init") return handleInit(data);
+    if (action === "update") return handleUpdate(data);
+    if (action === "full_sync") return handleFullSync(data);
 
-    return ContentService
-      .createTextOutput(JSON.stringify({ success: true, written: questions.length }))
-      .setMimeType(ContentService.MimeType.JSON);
+    return jsonResponse({ error: "Unknown action" });
   } finally {
     lock.releaseLock();
   }
 }
 
+// Write new rows, return their sheet row numbers as rowIds
+function handleInit(data) {
+  const sheet = getOrCreateSheet();
+  const questions = data.questions || [];
+  const rowIds = [];
+
+  questions.forEach((q) => {
+    const row = buildRow(q);
+    sheet.appendRow(row);
+    const rowNum = sheet.getLastRow();
+    colorRowByStatus(sheet, rowNum, q.status || "Pending");
+    rowIds.push(rowNum);
+  });
+
+  return jsonResponse({ success: true, written: questions.length, rowIds });
+}
+
+// Update a single cell by sheet row number
+function handleUpdate(data) {
+  const sheet = getOrCreateSheet();
+  const { rowId, field, value } = data;
+
+  const colNum = COL[field];
+  if (!colNum || !rowId) return jsonResponse({ error: "Invalid rowId or field" });
+
+  sheet.getRange(rowId, colNum).setValue(value);
+
+  // Re-color the whole row if status changed
+  if (field === "status") {
+    colorRowByStatus(sheet, rowId, value);
+  }
+
+  return jsonResponse({ success: true });
+}
+
+// Full re-sync: find row by rowId (stored in col 2 as a marker) and overwrite
+// For rows that have a rowId, we look up by row number directly
+function handleFullSync(data) {
+  const sheet = getOrCreateSheet();
+  const questions = data.questions || [];
+  let updated = 0;
+
+  questions.forEach((q) => {
+    if (!q.rowId) return; // skip questions not yet synced
+    const rowNum = q.rowId;
+    const row = buildRow(q);
+    const range = sheet.getRange(rowNum, 1, 1, HEADERS.length);
+    range.setValues([row]);
+    colorRowByStatus(sheet, rowNum, q.status || "Pending");
+    updated++;
+  });
+
+  return jsonResponse({ success: true, updated });
+}
+
+function buildRow(q) {
+  return [
+    q.date,
+    q.qNumGlobal,
+    q.qNumLocal,
+    q.questionType,
+    q.seriesTitle,
+    q.videoTitle,
+    q.sourceVideoLink,
+    q.question,
+    (q.options || []).join(" | "),
+    q.answer,
+    q.difficulty,
+    q.timeSec,
+    q.clipRef,
+    q.sourceDoc,
+    q.status || "Pending",
+    q.editorVideoLink || "",
+    q.remarks || ""
+  ];
+}
+
 function doGet(e) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName(SHEET_NAME);
-  if (!sheet) return ContentService.createTextOutput(JSON.stringify({ rows: [] })).setMimeType(ContentService.MimeType.JSON);
+  if (!sheet) return jsonResponse({ rows: [] });
   const data = sheet.getDataRange().getValues();
-  return ContentService
-    .createTextOutput(JSON.stringify({ rows: data }))
-    .setMimeType(ContentService.MimeType.JSON);
+  return jsonResponse({ rows: data });
 }
 
 function formatHeaders(sheet) {
@@ -278,7 +367,7 @@ function formatHeaders(sheet) {
   header.setFontWeight("bold");
   header.setFontSize(11);
   sheet.setFrozenRows(1);
-  sheet.setColumnWidth(8, 300); // Question column wider
+  sheet.setColumnWidth(8, 300);
   sheet.setColumnWidth(5, 200);
   sheet.setColumnWidth(6, 200);
 }
@@ -287,6 +376,12 @@ function colorRowByStatus(sheet, rowNum, status) {
   const range = sheet.getRange(rowNum, 1, 1, HEADERS.length);
   const colors = { "Pending": "#2d2000", "Review": "#001a40", "Complete": "#001a14" };
   range.setBackground(colors[status] || "#0e0e1a");
+}
+
+function jsonResponse(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
 }`;
 
 function ScriptModal({ onClose }: { onClose: () => void }) {
@@ -300,7 +395,7 @@ function ScriptModal({ onClose }: { onClose: () => void }) {
     <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="modal" style={{ maxWidth: 800, maxHeight: "90vh", overflow: "auto" }}>
         <div className="modal-header">
-          <span className="modal-title">📄 Google Apps Script Code</span>
+          <span className="modal-title">📄 Google Apps Script Code (v2)</span>
           <button className="modal-close" onClick={onClose}>✕</button>
         </div>
         <p style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 16 }}>
@@ -327,11 +422,15 @@ function ScriptModal({ onClose }: { onClose: () => void }) {
 
 /* ── MAIN PAGE ───────────────────────────────────────── */
 export default function Home() {
+  const router = useRouter();
+  const [authChecked, setAuthChecked] = useState(false);
+  const [username, setUsername] = useState("");
+
   const [url, setUrl] = useState("");
   const [rows, setRows] = useState<ParsedQuestion[]>([]);
   const [filteredRows, setFilteredRows] = useState<ParsedQuestion[]>([]);
   const [loading, setLoading] = useState(false);
-  const [pushing, setPushing] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [history, setHistory] = useState<{ url: string; label: string; date: string }[]>([]);
   const [scriptUrl, setScriptUrl] = useState("");
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -342,13 +441,29 @@ export default function Home() {
   const [filterType, setFilterType] = useState("All");
   const [filterSeries, setFilterSeries] = useState("All");
   const [search, setSearch] = useState("");
+  const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
+  const [syncingRowId, setSyncingRowId] = useState<number | null>(null);
+
   const toastId = useRef(0);
 
+  /* ── Auth check on mount ──── */
   useEffect(() => {
+    fetch("/api/auth/me")
+      .then((r) => r.json())
+      .then((d) => {
+        if (!d.ok) { router.replace("/login"); return; }
+        setUsername(d.username);
+        setAuthChecked(true);
+      })
+      .catch(() => router.replace("/login"));
+  }, [router]);
+
+  useEffect(() => {
+    if (!authChecked) return;
     setRows(loadRows());
     setHistory(loadHistory());
     setScriptUrl(localStorage.getItem(LS_SCRIPT) || "");
-  }, []);
+  }, [authChecked]);
 
   const addToast = useCallback((type: Toast["type"], msg: string) => {
     const id = ++toastId.current;
@@ -385,6 +500,25 @@ export default function Home() {
     docs:     new Set(rows.map((r) => r.sourceDoc)).size,
   };
 
+  /* ── Live cell update ───────────── */
+  const liveUpdate = useCallback(async (rowId: number, field: string, value: string) => {
+    if (!scriptUrl) return; // silent if no script url
+    setSyncingRowId(rowId);
+    try {
+      await fetch("/api/sync/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scriptUrl, rowId, field, value }),
+      });
+      // Show a brief sync indicator, no full toast for every change
+    } catch {
+      addToast("error", "⚠️ Live sync failed — change saved locally");
+    } finally {
+      setSyncingRowId(null);
+    }
+  }, [scriptUrl, addToast]);
+
+  /* ── Parse & auto-sync to sheet ── */
   const handleParse = async () => {
     if (!url.trim()) { addToast("error", "Please paste a Google Drive document URL"); return; }
     setLoading(true);
@@ -393,24 +527,62 @@ export default function Home() {
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || "Parse failed");
       if (!data.questions?.length) { addToast("info", "No questions found in this document"); return; }
-      const merged = [...rows, ...data.questions];
+
+      let newQuestions: ParsedQuestion[] = data.questions;
+
+      // Auto-sync to sheet if script URL configured
+      if (scriptUrl) {
+        setSyncing(true);
+        addToast("info", `⚡ Syncing ${newQuestions.length} questions to sheet…`);
+        try {
+          const syncResp = await fetch("/api/sync/init", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ questions: newQuestions, scriptUrl }),
+          });
+          const syncData = await syncResp.json();
+          if (syncResp.ok && syncData.rowIds?.length) {
+            // Attach permanent rowId to each question
+            newQuestions = newQuestions.map((q, i) => ({
+              ...q,
+              rowId: syncData.rowIds[i] ?? undefined,
+            }));
+          }
+        } catch {
+          addToast("error", "⚠️ Sheet sync failed — questions saved locally only");
+        } finally {
+          setSyncing(false);
+        }
+      }
+
+      const merged = [...rows, ...newQuestions];
       setRows(merged);
       saveRows(merged);
       addHistory(url.trim());
       setHistory(loadHistory());
-      addToast("success", `✅ Parsed ${data.questions.length} questions successfully`);
+
+      // Push undo entry for the entire import batch
+      const batchDate = newQuestions[0]?.date || new Date().toISOString().split("T")[0];
+      setUndoStack((s) => [
+        { type: "import", rowGlobal: -1, oldValue: null, newValue: newQuestions.length, batchDate },
+        ...s.slice(0, 19),
+      ]);
+
+      addToast("success", `✅ Parsed & synced ${newQuestions.length} questions${scriptUrl ? " to sheet" : " locally"}`);
       setUrl("");
     } catch (err: unknown) {
       addToast("error", err instanceof Error ? err.message : "Parse error");
     } finally {
       setLoading(false);
+      setSyncing(false);
     }
   };
 
-  const handlePush = async () => {
+  /* ── Full re-sync (safety net) ── */
+  const handleFullSync = async () => {
     if (!scriptUrl) { setShowSettings(true); return; }
-    if (!rows.length) { addToast("error", "No questions to push"); return; }
-    setPushing(true);
+    if (!rows.length) { addToast("error", "No questions to sync"); return; }
+    setSyncing(true);
     try {
       const resp = await fetch("/api/push", {
         method: "POST",
@@ -418,44 +590,116 @@ export default function Home() {
         body: JSON.stringify({ questions: rows, scriptUrl }),
       });
       const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || "Push failed");
-      addToast("success", `🚀 Pushed ${data.written} rows to Google Sheet!`);
+      if (!resp.ok) throw new Error(data.error || "Sync failed");
+      addToast("success", `🔄 Full re-sync: ${data.written} rows updated in Google Sheet`);
     } catch (err: unknown) {
-      addToast("error", err instanceof Error ? err.message : "Push error");
+      addToast("error", err instanceof Error ? err.message : "Sync error");
     } finally {
-      setPushing(false);
+      setSyncing(false);
     }
   };
 
-  const handleStatusChange = (idx: number, status: Status) => {
-    const updated = rows.map((r, i) => i === idx ? { ...r, status } : r);
+  /* ── Status inline change (live) ── */
+  const handleStatusChange = async (origIdx: number, status: Status) => {
+    const row = rows[origIdx];
+    const oldStatus = row.status;
+    const updated = rows.map((r, i) => i === origIdx ? { ...r, status } : r);
     setRows(updated);
     saveRows(updated);
+
+    setUndoStack((s) => [
+      { type: "status", rowGlobal: row.qNumGlobal, field: "status", oldValue: oldStatus, newValue: status },
+      ...s.slice(0, 19),
+    ]);
+
+    // Live cell update
+    if (row.rowId) {
+      await liveUpdate(row.rowId, "status", status);
+    }
   };
 
-  const handleSaveEdit = (updated: ParsedQuestion) => {
+  /* ── Edit modal save (live multi-field update) ── */
+  const handleSaveEdit = async (updated: ParsedQuestion) => {
+    const original = rows.find((r) => r.qNumGlobal === updated.qNumGlobal);
     const newRows = rows.map((r) =>
       r.qNumGlobal === updated.qNumGlobal ? updated : r
     );
     setRows(newRows);
     saveRows(newRows);
+
+    if (original) {
+      setUndoStack((s) => [
+        { type: "edit", rowGlobal: updated.qNumGlobal, oldValue: original, newValue: updated },
+        ...s.slice(0, 19),
+      ]);
+    }
+
     addToast("success", "Row updated");
+
+    // Live update all changed fields
+    if (updated.rowId && scriptUrl) {
+      const fields: (keyof ParsedQuestion)[] = ["status","editorVideoLink","remarks","seriesTitle","videoTitle","sourceVideoLink","question","answer","questionType"];
+      for (const field of fields) {
+        if (!original || original[field] !== updated[field]) {
+          if (FIELD_TO_COL[field]) {
+            await liveUpdate(updated.rowId, field, String(updated[field] ?? ""));
+          }
+        }
+      }
+    }
+  };
+
+  /* ── Undo ── */
+  const handleUndo = async () => {
+    if (!undoStack.length) return;
+    const [last, ...rest] = undoStack;
+    setUndoStack(rest);
+
+    if (last.type === "import" && last.batchDate) {
+      // Remove entire batch by date
+      const trimmed = rows.filter((r) => r.date !== last.batchDate);
+      setRows(trimmed);
+      saveRows(trimmed);
+      addToast("info", `↩ Undid import of ${Number(last.newValue)} questions`);
+      return;
+    }
+
+    if (last.type === "status") {
+      const oldStatus = last.oldValue as Status;
+      const updated = rows.map((r) =>
+        r.qNumGlobal === last.rowGlobal ? { ...r, status: oldStatus } : r
+      );
+      setRows(updated);
+      saveRows(updated);
+      addToast("info", `↩ Reverted status to "${oldStatus}"`);
+      // Live revert the sheet cell
+      const row = updated.find((r) => r.qNumGlobal === last.rowGlobal);
+      if (row?.rowId) await liveUpdate(row.rowId, "status", oldStatus);
+      return;
+    }
+
+    if (last.type === "edit") {
+      const oldRow = last.oldValue as ParsedQuestion;
+      const updated = rows.map((r) =>
+        r.qNumGlobal === last.rowGlobal ? oldRow : r
+      );
+      setRows(updated);
+      saveRows(updated);
+      addToast("info", "↩ Reverted row edit");
+      // Full re-sync for this row (re-apply all old fields)
+      if (oldRow.rowId && scriptUrl) {
+        await liveUpdate(oldRow.rowId, "status", String(oldRow.status));
+        await liveUpdate(oldRow.rowId, "editorVideoLink", oldRow.editorVideoLink);
+        await liveUpdate(oldRow.rowId, "remarks", oldRow.remarks);
+      }
+    }
   };
 
   const handleClear = () => {
     if (!confirm("Clear all imported questions from local view? (Sheet data is unaffected)")) return;
     setRows([]);
     saveRows([]);
-  };
-
-  const handleUndo = () => {
-    // Remove last batch (same date)
-    if (!rows.length) return;
-    const lastDate = rows[rows.length - 1].date;
-    const trimmed = rows.filter((r) => r.date !== lastDate);
-    setRows(trimmed);
-    saveRows(trimmed);
-    addToast("info", "Undid last import");
+    setUndoStack([]);
   };
 
   const handleExportCSV = () => {
@@ -477,6 +721,19 @@ export default function Home() {
     setHistory(h);
   };
 
+  const handleLogout = async () => {
+    await fetch("/api/auth/logout", { method: "POST" });
+    router.replace("/login");
+  };
+
+  if (!authChecked) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", background: "var(--bg-base)" }}>
+        <div className="spinner" style={{ width: 32, height: 32 }} />
+      </div>
+    );
+  }
+
   return (
     <>
       {/* HEADER */}
@@ -486,12 +743,21 @@ export default function Home() {
             <div className="logo-icon">📊</div>
             <span className="logo-text">QuestionVault</span>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            {scriptUrl && (
+              <div className="live-indicator">
+                <span className="live-dot" />
+                Live Sync
+              </div>
+            )}
             <button className="toolbar-btn" onClick={() => setShowScript(true)}>📄 Apps Script</button>
             <button id="settings-btn" className="toolbar-btn" onClick={() => setShowSettings(true)}>⚙️ Settings</button>
-            <div className="header-badge">
-              <span className="header-badge-dot" />
-              Drive → Sheets
+            <div className="header-user">
+              <span className="header-user-avatar">👤</span>
+              <span className="header-user-name">{username}</span>
+              <button className="header-logout-btn" onClick={handleLogout} title="Sign out">
+                ⏏ Logout
+              </button>
             </div>
           </div>
         </div>
@@ -506,7 +772,7 @@ export default function Home() {
         </h1>
         <p className="hero-subtitle">
           Paste any Google Drive document link, auto-parse all questions, and sync directly
-          to your Google Sheet — complete with status tracking for your editorial team.
+          to your Google Sheet — every edit updates the sheet in real-time, no duplicates ever.
         </p>
 
         {/* IMPORT BOX */}
@@ -523,16 +789,20 @@ export default function Home() {
             <button
               id="parse-btn"
               className="import-btn"
-              disabled={loading}
+              disabled={loading || syncing}
               onClick={handleParse}
             >
-              {loading ? <><span className="spinner" /> Parsing…</> : <><span>⚡</span> Parse & Import</>}
+              {loading ? <><span className="spinner" /> Parsing…</> :
+               syncing ? <><span className="spinner" /> Syncing…</> :
+               <><span>⚡</span> Parse & Import</>}
             </button>
           </div>
           <div className="import-hint">
             <span className="import-hint-item">🔗 docs.google.com/document/d/…</span>
             <span className="import-hint-item">🔒 Doc must be publicly shared</span>
-            <span className="import-hint-item">⏎ Press Enter to parse</span>
+            <span className="import-hint-item">
+              {scriptUrl ? "✅ Live sync enabled" : "⚠️ Configure Apps Script for live sync"}
+            </span>
           </div>
         </div>
       </section>
@@ -617,16 +887,23 @@ export default function Home() {
         </div>
 
         <div className="toolbar-right">
-          <button className="toolbar-btn" onClick={handleUndo} disabled={!rows.length}>↩ Undo</button>
+          <button
+            className={`toolbar-btn${undoStack.length > 0 ? " undo-ready" : ""}`}
+            onClick={handleUndo}
+            disabled={!undoStack.length}
+            title={undoStack.length > 0 ? `Undo: ${undoStack[0]?.type}` : "Nothing to undo"}
+          >
+            ↩ Undo {undoStack.length > 0 && <span className="undo-count">{undoStack.length}</span>}
+          </button>
           <button className="toolbar-btn danger" onClick={handleClear} disabled={!rows.length}>🗑 Clear All</button>
           <button id="export-csv-btn" className="toolbar-btn" onClick={handleExportCSV} disabled={!rows.length}>⬇ Export CSV</button>
           <button
             id="push-sheet-btn"
             className="toolbar-btn primary"
-            onClick={handlePush}
-            disabled={pushing || !rows.length}
+            onClick={handleFullSync}
+            disabled={syncing || !rows.length}
           >
-            {pushing ? <><span className="spinner" /> Pushing…</> : <>🚀 Push to Sheet</>}
+            {syncing ? <><span className="spinner" /> Syncing…</> : <>🔄 Re-Sync All</>}
           </button>
         </div>
       </div>
@@ -669,8 +946,9 @@ export default function Home() {
                 <tbody>
                   {filteredRows.map((q, i) => {
                     const origIdx = rows.findIndex((r) => r.qNumGlobal === q.qNumGlobal);
+                    const isSyncingThis = q.rowId !== undefined && syncingRowId === q.rowId;
                     return (
-                      <tr key={q.qNumGlobal}>
+                      <tr key={q.qNumGlobal} className={isSyncingThis ? "row-syncing" : ""}>
                         <td className="td-number">{i + 1}</td>
                         <td className="td-date">{q.date}</td>
                         <td className="td-qnum">G{q.qNumGlobal}</td>
@@ -692,26 +970,29 @@ export default function Home() {
                           {q.timeSec || "—"}
                         </td>
                         <td>
-                          <select
-                            className="filter-select"
-                            value={q.status}
-                            onChange={(e) => handleStatusChange(origIdx, e.target.value as Status)}
-                            style={{
-                              fontSize: 12,
-                              padding: "4px 28px 4px 8px",
-                              color: q.status === "Complete" ? "var(--status-complete)"
-                                   : q.status === "Review" ? "var(--status-review)"
-                                   : "var(--status-pending)",
-                              borderColor: q.status === "Complete" ? "var(--status-complete-border)"
-                                         : q.status === "Review" ? "var(--status-review-border)"
-                                         : "var(--status-pending-border)",
-                              background: q.status === "Complete" ? "var(--status-complete-bg)"
-                                        : q.status === "Review" ? "var(--status-review-bg)"
-                                        : "var(--status-pending-bg)",
-                            }}
-                          >
-                            {STATUS_OPTIONS.map((s) => <option key={s}>{s}</option>)}
-                          </select>
+                          <div style={{ position: "relative" }}>
+                            <select
+                              className="filter-select"
+                              value={q.status}
+                              onChange={(e) => handleStatusChange(origIdx, e.target.value as Status)}
+                              style={{
+                                fontSize: 12,
+                                padding: "4px 28px 4px 8px",
+                                color: q.status === "Complete" ? "var(--status-complete)"
+                                     : q.status === "Review" ? "var(--status-review)"
+                                     : "var(--status-pending)",
+                                borderColor: q.status === "Complete" ? "var(--status-complete-border)"
+                                           : q.status === "Review" ? "var(--status-review-border)"
+                                           : "var(--status-pending-border)",
+                                background: q.status === "Complete" ? "var(--status-complete-bg)"
+                                          : q.status === "Review" ? "var(--status-review-bg)"
+                                          : "var(--status-pending-bg)",
+                              }}
+                            >
+                              {STATUS_OPTIONS.map((s) => <option key={s}>{s}</option>)}
+                            </select>
+                            {isSyncingThis && <span className="cell-sync-dot" title="Syncing…" />}
+                          </div>
                         </td>
                         <td className="td-link">
                           {q.editorVideoLink
@@ -744,6 +1025,12 @@ export default function Home() {
         <span>Drive → Sheet Production Tracker</span>
         <span style={{ color: "var(--border-normal)" }}>·</span>
         <span>{rows.length} questions loaded</span>
+        {scriptUrl && (
+          <>
+            <span style={{ color: "var(--border-normal)" }}>·</span>
+            <span style={{ color: "var(--status-complete)" }}>● Live sync active</span>
+          </>
+        )}
       </footer>
 
       {/* MODALS */}
