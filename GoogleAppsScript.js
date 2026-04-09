@@ -138,20 +138,26 @@ function doGet(e) {
 
 function formatHeaders(sheet) {
   const header = sheet.getRange(1, 1, 1, HEADERS.length);
-  header.setBackground("#1e1b4b");
-  header.setFontColor("#a78bfa");
+  header.setBackground("#4f46e5");
+  header.setFontColor("#ffffff");
   header.setFontWeight("bold");
   header.setFontSize(11);
   sheet.setFrozenRows(1);
-  sheet.setColumnWidth(8, 300);
-  sheet.setColumnWidth(5, 200);
-  sheet.setColumnWidth(6, 200);
+  sheet.setColumnWidth(10, 320); // Question column
+  sheet.setColumnWidth(5, 180);  // Superpower
+  sheet.setColumnWidth(6, 200);  // Sub-Competency
 }
 
 function colorRowByStatus(sheet, rowNum, status) {
+  if (rowNum < 2) return;
   const range = sheet.getRange(rowNum, 1, 1, HEADERS.length);
-  const colors = { "Pending": "#2d2000", "Review": "#001a40", "Complete": "#001a14" };
-  range.setBackground(colors[status] || "#0e0e1a");
+  // Vibrant pastel colors — easy on the eyes, clearly distinct
+  const colors = {
+    "Pending":  "#FFF3CD", // warm amber
+    "Review":   "#CCE5FF", // cool sky blue
+    "Complete": "#D4EDDA", // fresh mint green
+  };
+  range.setBackground(colors[status] || "#F8F9FA");
 }
 
 function jsonResponse(obj) {

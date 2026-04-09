@@ -255,6 +255,15 @@ function parseDocument(text: string, sourceUrl: string): ParsedQuestion[] {
       continue;
     }
 
+    // Bracket-format Superpower: [⚙️ Smart Logic (Pattern Recognition)]
+    // Can appear on its own line anywhere inside a question block
+    const bracketMatch = line.match(/^\s*\[\s*[^\w]*(\w[\w\s]+?)\s*\(([^)]+)\)\s*\]\s*$/);
+    if (bracketMatch) {
+      currentSuperpower = bracketMatch[1].trim();
+      currentSubCompetency = bracketMatch[2].trim();
+      continue;
+    }
+
     // Numbered option lines: "1. Something" or "   1. Something"
     if (captureMode === "options") {
       const optMatch = line.match(/^(\d+)\.\s+(.+)/);
