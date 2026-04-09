@@ -262,10 +262,12 @@ function parseDocument(text: string, sourceUrl: string): ParsedQuestion[] {
       continue;
     }
 
-    // Bracket-format Superpower: [⚙️ Smart Logic (Pattern Recognition)]
-    // Can appear on its own line anywhere inside a question block
-    // Strips emojis, variation selectors, and spaces before the name
-    const bracketMatch = line.match(/^\s*\[([^\]]+)\]\s*$/);
+    // Bracket-format Superpower:
+    //   * [Smart Logic (Logical Deduction)]
+    //   * [👁️ Super Vision (Visual Mapping)]
+    //   * [🔧 Master Builder (Systems Thinking)]
+    // Line may start with optional '* ' prefix, spaces, then '[...]'
+    const bracketMatch = line.match(/^\*?\s*\[([^\]]+)\]\s*$/);
     if (bracketMatch) {
       const inner = bracketMatch[1].trim();
       // Strip leading emoji / non-letter chars to get to the actual name
@@ -274,6 +276,7 @@ function parseDocument(text: string, sourceUrl: string): ParsedQuestion[] {
       if (parenIdx !== -1) {
         currentSuperpower = nameAndComp.slice(0, parenIdx).trim();
         currentSubCompetency = nameAndComp.slice(parenIdx + 1).replace(/\).*$/, "").trim();
+        captureMode = "none";
         continue;
       }
     }
@@ -285,7 +288,8 @@ function parseDocument(text: string, sourceUrl: string): ParsedQuestion[] {
         currentOptions.push(`${optMatch[1]}. ${optMatch[2]}`);
         continue;
       }
-      // End of options if we see something else that's not a continuation
+      // End of options on any bullet-point line — but DON'T continue,
+      // fall through so bracket lines etc. can still be processed below
       if (/^\*/.test(line)) {
         captureMode = "none";
       }
