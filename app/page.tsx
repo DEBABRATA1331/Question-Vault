@@ -90,7 +90,17 @@ void statusBadge;
 
 function difficultyBar(d: string) {
   if (!d) return null;
-  const [num] = d.split("/").map(Number);
+  // Support both "4/10" and "Level 3" formats
+  let num: number;
+  const fractionM = d.match(/(\d+)\/\d+/);
+  const levelM = d.match(/Level\s*(\d+)/i);
+  if (fractionM) {
+    num = Number(fractionM[1]);
+  } else if (levelM) {
+    num = Number(levelM[1]);
+  } else {
+    num = 0;
+  }
   const max = 10;
   const dots = Array.from({ length: max }, (_, i) => {
     let color = "#2a2a40";
@@ -267,7 +277,6 @@ const HEADERS = [
   "Clip Reference", "Source Doc", "Status", "Editor Video Link", "Remarks"
 ];
 
-// Column index map (1-based) — must match HEADERS order exactly
 const COL = {
   date: 1, qNumGlobal: 2, qNumLocal: 3, questionType: 4,
   superpower: 5, subCompetency: 6,
@@ -280,12 +289,43 @@ const COL = {
 function getOrCreateSheet() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let sheet = ss.getSheetByName(SHEET_NAME);
-  if (!sheet) {
-    sheet = ss.insertSheet(SHEET_NAME);
-    sheet.appendRow(HEADERS);
+  if (!sheet) sheet = ss.insertSheet(SHEET_NAME);
+  ensureHeaders(sheet);
+  return sheet;
+}
+
+// Runs on EVERY request — self-healing headers
+function ensureHeaders(sheet) {
+  const firstRow = sheet.getRange(1, 1, 1, HEADERS.length).getValues()[0];
+  if (firstRow[0] !== HEADERS[0]) {
+    if (firstRow.some(cell => cell !== "")) sheet.insertRowBefore(1);
+    sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
     formatHeaders(sheet);
   }
-  return sheet;
+}
+
+// Run manually from Apps Script editor to repair missing headers
+function fixHeaders() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_NAME);
+    sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
+    formatHeaders(sheet);
+    SpreadsheetApp.getUi().alert("Sheet created and headers written!");
+    return;
+  }
+  const firstRow = sheet.getRange(1, 1, 1, HEADERS.length).getValues()[0];
+  const ok = firstRow[0] === HEADERS[0] && firstRow[HEADERS.length - 1] === HEADERS[HEADERS.length - 1];
+  if (ok) {
+    formatHeaders(sheet);
+    SpreadsheetApp.getUi().alert("Headers correct — formatting refreshed!");
+  } else {
+    sheet.insertRowBefore(1);
+    sheet.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS]);
+    formatHeaders(sheet);
+    SpreadsheetApp.getUi().alert("Headers inserted! Click Re-Sync All in the dashboard.");
+  }
 }
 
 function doPost(e) {
@@ -294,93 +334,58 @@ function doPost(e) {
   try {
     const data = JSON.parse(e.postData.contents);
     const action = data.action || "init";
-
-    if (action === "init") return handleInit(data);
-    if (action === "update") return handleUpdate(data);
+    if (action === "init")      return handleInit(data);
+    if (action === "update")    return handleUpdate(data);
     if (action === "full_sync") return handleFullSync(data);
-
     return jsonResponse({ error: "Unknown action" });
-  } finally {
-    lock.releaseLock();
-  }
+  } finally { lock.releaseLock(); }
 }
 
-// Write new rows, return their sheet row numbers as rowIds
 function handleInit(data) {
   const sheet = getOrCreateSheet();
   const questions = data.questions || [];
   const rowIds = [];
-
   questions.forEach((q) => {
-    const row = buildRow(q);
-    sheet.appendRow(row);
+    sheet.appendRow(buildRow(q));
     const rowNum = sheet.getLastRow();
     colorRowByStatus(sheet, rowNum, q.status || "Pending");
     rowIds.push(rowNum);
   });
-
   return jsonResponse({ success: true, written: questions.length, rowIds });
 }
 
-// Update a single cell by sheet row number
 function handleUpdate(data) {
   const sheet = getOrCreateSheet();
   const { rowId, field, value } = data;
-
   const colNum = COL[field];
   if (!colNum || !rowId) return jsonResponse({ error: "Invalid rowId or field" });
-
   sheet.getRange(rowId, colNum).setValue(value);
-
-  // Re-color the whole row if status changed
-  if (field === "status") {
-    colorRowByStatus(sheet, rowId, value);
-  }
-
+  if (field === "status") colorRowByStatus(sheet, rowId, value);
   return jsonResponse({ success: true });
 }
 
-// Full re-sync: find row by rowId (stored in col 2 as a marker) and overwrite
-// For rows that have a rowId, we look up by row number directly
 function handleFullSync(data) {
   const sheet = getOrCreateSheet();
   const questions = data.questions || [];
   let updated = 0;
-
   questions.forEach((q) => {
-    if (!q.rowId) return; // skip questions not yet synced
-    const rowNum = q.rowId;
-    const row = buildRow(q);
-    const range = sheet.getRange(rowNum, 1, 1, HEADERS.length);
-    range.setValues([row]);
-    colorRowByStatus(sheet, rowNum, q.status || "Pending");
+    if (!q.rowId) return;
+    sheet.getRange(q.rowId, 1, 1, HEADERS.length).setValues([buildRow(q)]);
+    colorRowByStatus(sheet, q.rowId, q.status || "Pending");
     updated++;
   });
-
   return jsonResponse({ success: true, updated });
 }
 
 function buildRow(q) {
   return [
-    q.date,
-    q.qNumGlobal,
-    q.qNumLocal,
-    q.questionType,
-    q.superpower || "",
-    q.subCompetency || "",
-    q.seriesTitle,
-    q.videoTitle,
-    q.sourceVideoLink,
-    q.question,
-    (q.options || []).join(" | "),
-    q.answer,
-    q.difficulty,
-    q.timeSec,
-    q.clipRef,
-    q.sourceDoc,
-    q.status || "Pending",
-    q.editorVideoLink || "",
-    q.remarks || ""
+    q.date, q.qNumGlobal, q.qNumLocal, q.questionType,
+    q.superpower || "", q.subCompetency || "",
+    q.seriesTitle, q.videoTitle, q.sourceVideoLink,
+    q.question, (q.options || []).join(" | "),
+    q.answer, q.difficulty, q.timeSec, q.clipRef,
+    q.sourceDoc, q.status || "Pending",
+    q.editorVideoLink || "", q.remarks || ""
   ];
 }
 
@@ -388,33 +393,30 @@ function doGet(e) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName(SHEET_NAME);
   if (!sheet) return jsonResponse({ rows: [] });
-  const data = sheet.getDataRange().getValues();
-  return jsonResponse({ rows: data });
+  return jsonResponse({ rows: sheet.getDataRange().getValues() });
 }
 
 function formatHeaders(sheet) {
-  const header = sheet.getRange(1, 1, 1, HEADERS.length);
-  header.setBackground("#4f46e5");
-  header.setFontColor("#ffffff");
-  header.setFontWeight("bold");
-  header.setFontSize(11);
+  const h = sheet.getRange(1, 1, 1, HEADERS.length);
+  h.setValues([HEADERS]);
+  h.setBackground("#4f46e5");
+  h.setFontColor("#ffffff");
+  h.setFontWeight("bold");
+  h.setFontSize(11);
+  h.setWrap(false);
   sheet.setFrozenRows(1);
-  sheet.setColumnWidth(10, 320);
-  sheet.setColumnWidth(5, 180);
-  sheet.setColumnWidth(6, 200);
+  [100,90,80,110,160,180,180,160,200,340,200,100,100,90,130,200,100,200,200]
+    .forEach((w, i) => sheet.setColumnWidth(i + 1, w));
 }
 
 function colorRowByStatus(sheet, rowNum, status) {
   if (rowNum < 2) return;
-  const range = sheet.getRange(rowNum, 1, 1, HEADERS.length);
   const colors = { "Pending": "#FFF3CD", "Review": "#CCE5FF", "Complete": "#D4EDDA" };
-  range.setBackground(colors[status] || "#F8F9FA");
+  sheet.getRange(rowNum, 1, 1, HEADERS.length).setBackground(colors[status] || "#F8F9FA");
 }
 
 function jsonResponse(obj) {
-  return ContentService
-    .createTextOutput(JSON.stringify(obj))
-    .setMimeType(ContentService.MimeType.JSON);
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }`;
 
 function ScriptModal({ onClose }: { onClose: () => void }) {
@@ -978,6 +980,7 @@ export default function Home() {
                     <th>Q# Local</th>
                     <th>Type</th>
                     <th>Superpower</th>
+                    <th>Competency</th>
                     <th>Series / Topic</th>
                     <th>Video Title</th>
                     <th>Source Link</th>
@@ -1002,8 +1005,12 @@ export default function Home() {
                         <td className="td-qnum">{q.qNumLocal}</td>
                         <td>{typeBadge(q.questionType)}</td>
                         <td className="td-superpower">
-                          <div style={{ fontSize: 13, fontWeight: 500, color: "var(--accent-cyan)", whiteSpace: "nowrap" }}>{q.superpower || "—"}</div>
-                          <div style={{ fontSize: 11, color: "var(--text-secondary)", whiteSpace: "nowrap" }}>{q.subCompetency || ""}</div>
+                          {q.superpower
+                            ? <span style={{ fontSize: 12, fontWeight: 600, color: "var(--accent-cyan)", whiteSpace: "nowrap", background: "rgba(34,211,238,0.10)", borderRadius: 6, padding: "2px 7px" }}>{q.superpower}</span>
+                            : <span style={{ color: "var(--text-muted)" }}>—</span>}
+                        </td>
+                        <td style={{ fontSize: 11, color: "var(--text-secondary)", whiteSpace: "nowrap" }}>
+                          {q.subCompetency || <span style={{ color: "var(--text-muted)" }}>—</span>}
                         </td>
                         <td className="td-topic">{q.seriesTitle || "—"}</td>
                         <td style={{ fontSize: 12, color: "var(--text-secondary)", maxWidth: 160 }}>

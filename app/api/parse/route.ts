@@ -244,11 +244,18 @@ function parseDocument(text: string, sourceUrl: string): ParsedQuestion[] {
       continue;
     }
 
-    // Difficulty + Time (inline: "4/10 | Time: 20s")
+    // Difficulty + Time (inline: "4/10 | Time: 20s" OR "Level 3 | Time: 20s")
     if (/^\*?\s*Difficulty\s*:/i.test(line)) {
       const rest = line.replace(/^\*?\s*Difficulty\s*:/i, "").trim();
+      // Match "4/10" format
       const diffM = rest.match(/(\d+\/\d+)/);
-      if (diffM) currentDifficulty = diffM[1];
+      if (diffM) {
+        currentDifficulty = diffM[1];
+      } else {
+        // Match "Level 3" format → store as "Level 3"
+        const levelM = rest.match(/Level\s*(\d+)/i);
+        if (levelM) currentDifficulty = `Level ${levelM[1]}`;
+      }
       const timeM = rest.match(/Time\s*:\s*(\d+s?)/i);
       if (timeM) currentTime = timeM[1];
       captureMode = "none";
@@ -257,11 +264,18 @@ function parseDocument(text: string, sourceUrl: string): ParsedQuestion[] {
 
     // Bracket-format Superpower: [⚙️ Smart Logic (Pattern Recognition)]
     // Can appear on its own line anywhere inside a question block
-    const bracketMatch = line.match(/^\s*\[\s*[^\w]*(\w[\w\s]+?)\s*\(([^)]+)\)\s*\]\s*$/);
+    // Strips emojis, variation selectors, and spaces before the name
+    const bracketMatch = line.match(/^\s*\[([^\]]+)\]\s*$/);
     if (bracketMatch) {
-      currentSuperpower = bracketMatch[1].trim();
-      currentSubCompetency = bracketMatch[2].trim();
-      continue;
+      const inner = bracketMatch[1].trim();
+      // Strip leading emoji / non-letter chars to get to the actual name
+      const nameAndComp = inner.replace(/^[^a-zA-Z]+/, "");
+      const parenIdx = nameAndComp.lastIndexOf("(");
+      if (parenIdx !== -1) {
+        currentSuperpower = nameAndComp.slice(0, parenIdx).trim();
+        currentSubCompetency = nameAndComp.slice(parenIdx + 1).replace(/\).*$/, "").trim();
+        continue;
+      }
     }
 
     // Numbered option lines: "1. Something" or "   1. Something"
